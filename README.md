@@ -12,6 +12,7 @@ Model Context Protocol (MCP) server for integrating Redash with AI assistants li
 - List available queries and dashboards as resources
 - Execute queries and retrieve results
 - Execute saved parameterized queries with typed values and saved defaults
+- Explore large BigQuery schemas safely with dataset, table, and column pagination
 - Create and manage queries (create, update, archive)
 - Manage query parameters, dashboard parameters, and widget parameter mappings
 - Inspect and update dashboard widget layouts and grid positions
@@ -330,6 +331,51 @@ Published images are signed with keyless cosign.
 - `execute_parameterized_query`: Execute a saved parameterized query with type-aware value coercion, saved defaults, and optional `maxAge`
 - `execute_adhoc_query`: Execute an ad-hoc query without saving it to Redash
 - `get_query_results_csv`: Get query results in CSV format (supports optional refresh for latest data)
+
+### Schema Discovery
+
+- `get_schema`: Get the complete schema for a non-BigQuery data source. BigQuery is intentionally blocked because Redash materializes its complete cached schema in memory.
+- `list_bigquery_datasets`: List datasets from a Redash BigQuery data source, with at most 100 results per page.
+- `list_bigquery_tables`: List tables in one BigQuery dataset, with at most 100 results per page.
+- `get_bigquery_table_schema`: Get column metadata for one BigQuery table, with at most 100 results per page.
+
+BigQuery discovery always runs through the configured Redash data source. The MCP server does not connect to BigQuery directly or require separate Google Cloud credentials.
+
+Start by listing datasets for the Redash data source. `projectId` and `location` are normally read from the Redash data source, but can be supplied when the API key cannot read those options:
+
+```json
+{
+  "dataSourceId": 4,
+  "location": "asia-northeast1",
+  "page": 1,
+  "pageSize": 25
+}
+```
+
+Then list tables in the dataset you want to use:
+
+```json
+{
+  "dataSourceId": 4,
+  "dataset": "analytics",
+  "page": 1,
+  "pageSize": 25
+}
+```
+
+Finally, inspect only the required table:
+
+```json
+{
+  "dataSourceId": 4,
+  "dataset": "analytics",
+  "table": "orders",
+  "page": 1,
+  "pageSize": 100
+}
+```
+
+Each tool queries BigQuery `INFORMATION_SCHEMA` through Redash with `LIMIT pageSize + 1`. The extra row is used to return `hasMore` and `nextPage` without loading the remaining metadata. The Redash BigQuery data source must use GoogleSQL, and its configured query location must match the dataset location.
 
 ### Dashboard Management
 - `list_dashboards`: List all available dashboards

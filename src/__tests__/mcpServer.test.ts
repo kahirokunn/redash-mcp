@@ -21,8 +21,8 @@ describe("Redash MCP server", () => {
     jest.restoreAllMocks();
   });
 
-  it("defines all 67 public tools", () => {
-    expect(toolDefinitions).toHaveLength(67);
+  it("defines all 70 public tools", () => {
+    expect(toolDefinitions).toHaveLength(70);
   });
 
   it("advertises the published package version", async () => {

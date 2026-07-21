@@ -579,6 +579,23 @@ describe('RedashClient', () => {
     });
   });
 
+  describe('getDataSource', () => {
+    it('should fetch one data source with its details', async () => {
+      const mockDataSource = {
+        id: 4,
+        name: 'BigQuery',
+        type: 'bigquery',
+        options: { projectId: 'kanabell-prod', location: 'asia-northeast1' },
+      };
+      mockAxiosInstance.get.mockResolvedValue({ data: mockDataSource });
+
+      const result = await client.getDataSource(4);
+
+      expect(mockAxiosInstance.get).toHaveBeenCalledWith('/api/data_sources/4');
+      expect(result).toEqual(mockDataSource);
+    });
+  });
+
   describe('getDashboards', () => {
     it('should fetch dashboards', async () => {
       const mockResponse = {

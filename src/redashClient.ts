@@ -84,6 +84,24 @@ export interface RedashQueryResult {
   retrieved_at: string;
 }
 
+export interface RedashDataSource {
+  id: number;
+  name: string;
+  type: string;
+  syntax?: string;
+  paused?: boolean;
+  pause_reason?: string | null;
+  supports_auto_limit?: boolean;
+  options?: {
+    projectId?: string;
+    location?: string;
+    [key: string]: unknown;
+  };
+  view_only?: boolean;
+}
+
+export type RedashDataSourceDetails = Partial<RedashDataSource>;
+
 export interface RedashDashboard {
   id: number;
   name: string;
@@ -522,13 +540,25 @@ export class RedashClient {
   }
 
   // List available data sources
-  async getDataSources(): Promise<any[]> {
+  async getDataSources(): Promise<RedashDataSource[]> {
     try {
       const response = await this.client.get('/api/data_sources');
       return response.data;
     } catch (error) {
       logger.error(`Error fetching data sources: ${error}`);
       throw new Error('Failed to fetch data sources from Redash');
+    }
+  }
+
+  // Get data source details. Redash omits type/options for users without
+  // list/admin permissions, so callers must handle a partial response.
+  async getDataSource(dataSourceId: number): Promise<RedashDataSourceDetails> {
+    try {
+      const response = await this.client.get(`/api/data_sources/${dataSourceId}`);
+      return response.data;
+    } catch (error) {
+      logger.error(`Error fetching data source ${dataSourceId}: ${error}`);
+      throw new Error(`Failed to fetch data source ${dataSourceId} from Redash`);
     }
   }
 

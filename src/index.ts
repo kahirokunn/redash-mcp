@@ -10,6 +10,12 @@ import { serveStdio, type ServeStdioOptions, type StdioServerHandle } from "@mod
 import { z, type ZodObject, type ZodRawShape } from "zod";
 import * as dotenv from 'dotenv';
 import { getRedashClient, CreateQueryRequest, UpdateQueryRequest, CreateVisualizationRequest, UpdateVisualizationRequest, CreateDashboardRequest, UpdateDashboardRequest, CreateAlertRequest, UpdateAlertRequest, CreateAlertSubscriptionRequest, CreateWidgetRequest, UpdateWidgetRequest, CreateQuerySnippetRequest, UpdateQuerySnippetRequest } from "./redashClient.js";
+import {
+  BigQuerySchemaService,
+  getBigQueryTableSchemaSchema,
+  listBigQueryDatasetsSchema,
+  listBigQueryTablesSchema,
+} from "./bigQuerySchema.js";
 import { buildChartVisualizationOptions, chartVisualizationUpdateSchema } from "./chartVisualization.js";
 import { mergeNamedEntries, queryParameterPatchSchema, resolveParameterOrder, toNamedEntries, toNamedRecord, widgetParameterMappingPatchSchema } from "./parameterManagement.js";
 import { buildParameterizedExecutionParameters, ParameterizedExecutionError } from "./parameterizedExecution.js";
@@ -22,6 +28,12 @@ import { PACKAGE_VERSION } from "./packageInfo.js";
 
 // Load environment variables
 dotenv.config({ quiet: true });
+
+let bigQuerySchemaService: BigQuerySchemaService | undefined;
+
+function getBigQuerySchemaService(): BigQuerySchemaService {
+  return (bigQuerySchemaService ??= new BigQuerySchemaService(getRedashClient()));
+}
 
 const emptyInputSchema = z.object({});
 
@@ -870,7 +882,7 @@ const getSchemaSchema = z.object({
 async function getSchema(params: z.infer<typeof getSchemaSchema>) {
   try {
     const { dataSourceId } = params;
-    const query = await getRedashClient().getSchema(dataSourceId);
+    const query = await getBigQuerySchemaService().getSchema(dataSourceId);
 
     return {
       content: [
@@ -894,6 +906,63 @@ async function getSchema(params: z.infer<typeof getSchemaSchema>) {
           }`,
         },
       ],
+    };
+  }
+}
+
+// Tool: list_bigquery_datasets
+async function listBigQueryDatasets(params: z.infer<typeof listBigQueryDatasetsSchema>) {
+  try {
+    const result = await getBigQuerySchemaService().listDatasets(params);
+    return {
+      content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
+    };
+  } catch (error) {
+    logger.error(`Error listing BigQuery datasets for data source ${params.dataSourceId}: ${error}`);
+    return {
+      isError: true,
+      content: [{
+        type: "text",
+        text: `Error listing BigQuery datasets for data source ${params.dataSourceId}: ${error instanceof Error ? error.message : String(error)}`,
+      }],
+    };
+  }
+}
+
+// Tool: list_bigquery_tables
+async function listBigQueryTables(params: z.infer<typeof listBigQueryTablesSchema>) {
+  try {
+    const result = await getBigQuerySchemaService().listTables(params);
+    return {
+      content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
+    };
+  } catch (error) {
+    logger.error(`Error listing BigQuery tables for ${params.dataset}: ${error}`);
+    return {
+      isError: true,
+      content: [{
+        type: "text",
+        text: `Error listing BigQuery tables for ${params.dataset}: ${error instanceof Error ? error.message : String(error)}`,
+      }],
+    };
+  }
+}
+
+// Tool: get_bigquery_table_schema
+async function getBigQueryTableSchema(params: z.infer<typeof getBigQueryTableSchemaSchema>) {
+  try {
+    const result = await getBigQuerySchemaService().getTableSchema(params);
+    return {
+      content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
+    };
+  } catch (error) {
+    logger.error(`Error getting BigQuery table schema for ${params.dataset}.${params.table}: ${error}`);
+    return {
+      isError: true,
+      content: [{
+        type: "text",
+        text: `Error getting BigQuery table schema for ${params.dataset}.${params.table}: ${error instanceof Error ? error.message : String(error)}`,
+      }],
     };
   }
 }
@@ -2190,7 +2259,30 @@ export const toolDefinitions = [
     chartVisualizationUpdateSchema,
   ),
   defineTool("delete_visualization", "Delete a visualization", deleteVisualization, deleteVisualizationSchema),
-  defineTool("get_schema", "Get schema of a specific data source", getSchema, getSchemaSchema),
+  defineTool(
+    "list_bigquery_datasets",
+    "List BigQuery datasets through Redash with bounded pagination. Start here instead of get_schema for BigQuery data sources.",
+    listBigQueryDatasets,
+    listBigQueryDatasetsSchema,
+  ),
+  defineTool(
+    "list_bigquery_tables",
+    "List tables in one BigQuery dataset through Redash with bounded pagination.",
+    listBigQueryTables,
+    listBigQueryTablesSchema,
+  ),
+  defineTool(
+    "get_bigquery_table_schema",
+    "Get paginated column metadata for one BigQuery table through Redash.",
+    getBigQueryTableSchema,
+    getBigQueryTableSchemaSchema,
+  ),
+  defineTool(
+    "get_schema",
+    "Get the full schema of a non-BigQuery data source. BigQuery is intentionally blocked; use list_bigquery_datasets, list_bigquery_tables, and get_bigquery_table_schema instead.",
+    getSchema,
+    getSchemaSchema,
+  ),
   defineTool("create_dashboard", "Create a new dashboard in Redash", createDashboard, createDashboardSchema),
   defineTool("update_dashboard", "Update an existing dashboard in Redash", updateDashboard, updateDashboardSchema),
   defineTool("get_dashboard_parameters", "Get the current dashboard parameter values and widget mappings", getDashboardParameters, getDashboardParametersSchema),
