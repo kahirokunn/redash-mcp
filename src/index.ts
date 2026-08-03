@@ -70,7 +70,7 @@ function defineTool<T extends ZodRawShape>(
   };
 }
 
-const paginationPageField = z.coerce.number().optional().default(1).describe("Page number (starts at 1)");
+const paginationPageField = z.coerce.number().int().min(1).optional().default(1).describe("Page number (starts at 1)");
 const paginationPageSizeField = z.coerce.number().optional().default(25).describe("Number of results per page");
 
 // ----- Tools Implementation -----
@@ -865,7 +865,7 @@ async function deleteVisualization(params: z.infer<typeof deleteVisualizationSch
 // Tool: get_schema
 const getSchemaSchema = z.object({
   dataSourceId: z.coerce.number().describe("ID of the data source to get schema"),
-  page: z.coerce.number().int().min(1).optional().default(1).describe("Page number (starts at 1)"),
+  page: paginationPageField,
   pageSize: z.coerce.number().int().min(1).max(100).optional().default(25)
     .describe("Number of tables per page (max 100)"),
   search: z.string().optional()
