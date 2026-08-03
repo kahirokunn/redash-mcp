@@ -13,6 +13,7 @@ import { getRedashClient, CreateQueryRequest, UpdateQueryRequest, CreateVisualiz
 import { buildChartVisualizationOptions, chartVisualizationUpdateSchema } from "./chartVisualization.js";
 import { mergeNamedEntries, queryParameterPatchSchema, resolveParameterOrder, toNamedEntries, toNamedRecord, widgetParameterMappingPatchSchema } from "./parameterManagement.js";
 import { buildParameterizedExecutionParameters, ParameterizedExecutionError } from "./parameterizedExecution.js";
+import { DEFAULT_SCHEMA_PAGE_SIZE, MAX_SCHEMA_PAGE_SIZE } from "./schemaPagination.js";
 import { mergeDeep } from "./utils.js";
 import { buildWidgetLayoutOptions, dashboardGridDefaults, summarizeWidgetLayout, widgetLayoutEntrySchema, widgetPositionSchema } from "./widgetLayout.js";
 import { logger } from "./logger.js";
@@ -866,8 +867,8 @@ async function deleteVisualization(params: z.infer<typeof deleteVisualizationSch
 const getSchemaSchema = z.object({
   dataSourceId: z.coerce.number().describe("ID of the data source to get schema"),
   page: paginationPageField,
-  pageSize: z.coerce.number().int().min(1).max(100).optional().default(25)
-    .describe("Number of tables per page (max 100)"),
+  pageSize: z.coerce.number().int().min(1).max(MAX_SCHEMA_PAGE_SIZE).optional().default(DEFAULT_SCHEMA_PAGE_SIZE)
+    .describe(`Number of tables per page (max ${MAX_SCHEMA_PAGE_SIZE})`),
   search: z.string().optional()
     .describe("Case-insensitive substring filter on table names; pagination applies to the filtered set"),
 });
@@ -2195,7 +2196,7 @@ export const toolDefinitions = [
     chartVisualizationUpdateSchema,
   ),
   defineTool("delete_visualization", "Delete a visualization", deleteVisualization, deleteVisualizationSchema),
-  defineTool("get_schema", "Get a schema page without buffering the complete schema in MCP (BigQuery is paged at the source); returns hasMore/nextPage and supports table-name search", getSchema, getSchemaSchema),
+  defineTool("get_schema", "Get a schema page without buffering the complete schema in MCP; BigQuery is paged at the source when its configured location is available. Returns hasMore/nextPage and supports table-name search. Query Results data sources are unsupported because their tables are created dynamically", getSchema, getSchemaSchema),
   defineTool("create_dashboard", "Create a new dashboard in Redash", createDashboard, createDashboardSchema),
   defineTool("update_dashboard", "Update an existing dashboard in Redash", updateDashboard, updateDashboardSchema),
   defineTool("get_dashboard_parameters", "Get the current dashboard parameter values and widget mappings", getDashboardParameters, getDashboardParametersSchema),

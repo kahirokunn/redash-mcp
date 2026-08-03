@@ -4,6 +4,7 @@ import { jest } from '@jest/globals';
 import { Readable } from 'node:stream';
 import { logger } from '../logger.js';
 import { isToolContentCaptureEnabled } from '../telemetry.js';
+import type { RedashSchemaPage, RedashSchemaResponse } from '../schemaStream.js';
 
 // Mock axios
 jest.mock('axios');
@@ -24,6 +25,12 @@ jest.mock('../telemetry.js', () => ({
 }));
 
 const mockedContentCapture = jest.mocked(isToolContentCaptureEnabled);
+
+function expectSchemaPage(response: RedashSchemaResponse): asserts response is RedashSchemaPage {
+  if (!('schema' in response)) {
+    throw new Error('Expected a schema page, received a schema job');
+  }
+}
 
 describe('RedashClient', () => {
   let client: RedashClient;
@@ -820,9 +827,48 @@ describe('RedashClient', () => {
       mockAxiosInstance.get.mockResolvedValue({ data: schemaStream() });
 
       const result = await client.getSchemaPage(1);
+      expectSchemaPage(result);
 
       expect(result.page).toBe(1);
       expect(result.pageSize).toBe(25);
+    });
+
+    it('should return a pending schema job unchanged', async () => {
+      const response = {
+        job: {
+          id: 'schema-job-123',
+          updated_at: 0,
+          status: 1,
+          error: '',
+          result: null,
+          query_result_id: null,
+        },
+      };
+      mockAxiosInstance.get.mockResolvedValue({
+        data: Readable.from([Buffer.from(JSON.stringify(response))]),
+      });
+
+      await expect(client.getSchemaPage(1)).resolves.toEqual(response);
+    });
+
+    it('should explain that Query Results has no static schema without calling its schema endpoint', async () => {
+      (client as unknown as { dataSourceTypes: Map<number, string> })
+        .dataSourceTypes.clear();
+      mockAxiosInstance.get.mockResolvedValue({
+        data: [{ id: 13, name: 'Query Results', type: 'results' }],
+      });
+
+      await expect(client.getSchemaPage(13)).rejects.toThrow(
+        'Data source 13 is a Query Results data source and does not expose a static schema; '
+        + 'use execute_adhoc_query with query_<query_id> or cached_query_<query_id> instead'
+      );
+      expect(mockAxiosInstance.get).toHaveBeenCalledTimes(1);
+      expect(mockAxiosInstance.get).toHaveBeenCalledWith('/api/data_sources');
+      expect(mockAxiosInstance.get).not.toHaveBeenCalledWith(
+        '/api/data_sources/13/schema',
+        expect.anything(),
+      );
+      expect(mockAxiosInstance.post).not.toHaveBeenCalled();
     });
 
     it('should reject an invalid page without calling Redash', async () => {
@@ -847,13 +893,14 @@ describe('RedashClient', () => {
     it('should query INFORMATION_SCHEMA for BigQuery and cache discovery metadata', async () => {
       (client as unknown as { dataSourceTypes: Map<number, string> })
         .dataSourceTypes.clear();
-      mockAxiosInstance.get.mockResolvedValue({
-        data: [{ id: 4, name: 'bigquery', type: 'bigquery' }],
-      });
-      mockAxiosInstance.post
+      mockAxiosInstance.get
         .mockResolvedValueOnce({
-          data: { query_result: { data: { rows: [{ location: 'asia-northeast1' }] } } },
+          data: [{ id: 4, name: 'bigquery', type: 'bigquery' }],
         })
+        .mockResolvedValueOnce({
+          data: { id: 4, type: 'bigquery', options: { location: 'ASIA-NORTHEAST1' } },
+        });
+      mockAxiosInstance.post
         .mockResolvedValueOnce({
           data: {
             query_result: {
@@ -887,29 +934,23 @@ describe('RedashClient', () => {
 
       const page1 = await client.getSchemaPage(4, 1, 1, 'analytics');
       const page2 = await client.getSchemaPage(4, 2, 1, 'analytics');
+      expectSchemaPage(page1);
+      expectSchemaPage(page2);
 
       expect(page1.schema[0]?.name).toBe('analytics.events');
       expect(page1.hasMore).toBe(true);
       expect(page2.schema[0]?.name).toBe('sales.orders');
       expect(page2.hasMore).toBe(false);
-      expect(mockAxiosInstance.get).toHaveBeenCalledTimes(1);
+      expect(mockAxiosInstance.get).toHaveBeenCalledTimes(2);
       expect(mockAxiosInstance.get).toHaveBeenCalledWith('/api/data_sources');
+      expect(mockAxiosInstance.get).toHaveBeenCalledWith('/api/data_sources/4');
       expect(mockAxiosInstance.get).not.toHaveBeenCalledWith(
         '/api/data_sources/4/schema',
         expect.anything(),
       );
-      expect(mockAxiosInstance.post).toHaveBeenCalledTimes(3);
+      expect(mockAxiosInstance.post).toHaveBeenCalledTimes(2);
       expect(mockAxiosInstance.post).toHaveBeenNthCalledWith(
         1,
-        '/api/query_results',
-        expect.objectContaining({
-          query: 'SELECT @@location AS location',
-          data_source_id: 4,
-          apply_auto_limit: false,
-        }),
-      );
-      expect(mockAxiosInstance.post).toHaveBeenNthCalledWith(
-        2,
         '/api/query_results',
         expect.objectContaining({
           query: expect.stringContaining('LIMIT 2 OFFSET 0'),
@@ -918,13 +959,115 @@ describe('RedashClient', () => {
         }),
       );
       expect(mockAxiosInstance.post).toHaveBeenNthCalledWith(
-        3,
+        2,
         '/api/query_results',
         expect.objectContaining({
           query: expect.stringContaining('LIMIT 2 OFFSET 1'),
           data_source_id: 4,
           apply_auto_limit: false,
         }),
+      );
+    });
+
+    it('should cache every data-source type returned by the first discovery request', async () => {
+      (client as unknown as { dataSourceTypes: Map<number, string> })
+        .dataSourceTypes.clear();
+      mockAxiosInstance.get.mockImplementation((path: string) => {
+        if (path === '/api/data_sources') {
+          return Promise.resolve({
+            data: [
+              { id: 1, name: 'postgres', type: 'pg' },
+              { id: 2, name: 'mysql', type: 'mysql' },
+              { id: 'invalid', name: 'invalid', type: 'pg' },
+              { id: 3, name: 'missing-type' },
+            ],
+          });
+        }
+        if (path === '/api/data_sources/1/schema' || path === '/api/data_sources/2/schema') {
+          return Promise.resolve({ data: schemaStream() });
+        }
+        return Promise.reject(new Error(`Unexpected path: ${path}`));
+      });
+
+      await client.getSchemaPage(1);
+      await client.getSchemaPage(2);
+
+      const discoveryCalls = mockAxiosInstance.get.mock.calls
+        .filter(([path]: [string]) => path === '/api/data_sources');
+      expect(discoveryCalls).toHaveLength(1);
+    });
+
+    it('should stream the schema when the BigQuery location is unavailable and cache that choice', async () => {
+      (client as unknown as { dataSourceTypes: Map<number, string> })
+        .dataSourceTypes.set(4, 'bigquery');
+      mockAxiosInstance.get
+        .mockResolvedValueOnce({ data: { id: 4, type: 'bigquery', options: {} } })
+        .mockResolvedValueOnce({ data: schemaStream() })
+        .mockResolvedValueOnce({ data: schemaStream() });
+
+      const first = await client.getSchemaPage(4, 1, 1);
+      const second = await client.getSchemaPage(4, 2, 1);
+      expectSchemaPage(first);
+      expectSchemaPage(second);
+
+      expect(first.schema).toEqual([mockSchema.schema[0]]);
+      expect(second.schema).toEqual([mockSchema.schema[1]]);
+      expect(mockAxiosInstance.get.mock.calls
+        .filter(([path]: [string]) => path === '/api/data_sources/4')).toHaveLength(1);
+      expect(mockAxiosInstance.get.mock.calls
+        .filter(([path]: [string]) => path === '/api/data_sources/4/schema')).toHaveLength(2);
+      expect(mockAxiosInstance.post).not.toHaveBeenCalled();
+    });
+
+    it('should stream the schema when BigQuery data-source discovery fails', async () => {
+      (client as unknown as { dataSourceTypes: Map<number, string> })
+        .dataSourceTypes.set(4, 'bigquery');
+      mockAxiosInstance.get
+        .mockRejectedValueOnce(new Error('detail unavailable'))
+        .mockResolvedValueOnce({ data: schemaStream() });
+
+      const result = await client.getSchemaPage(4, 1, 25);
+      expectSchemaPage(result);
+
+      expect(result.schema).toEqual(mockSchema.schema);
+      expect(mockAxiosInstance.post).not.toHaveBeenCalled();
+      expect(logger.warning).toHaveBeenCalledWith(
+        'Could not read the configured BigQuery location; falling back to the Redash schema endpoint',
+        expect.objectContaining({
+          'redash.data_source.id': 4,
+          'redash.schema.page': 1,
+          'redash.schema.page_size': 25,
+        }),
+        expect.any(Error),
+      );
+    });
+
+    it('should fall back and disable the optimization after a BigQuery metadata query fails', async () => {
+      (client as unknown as { dataSourceTypes: Map<number, string> })
+        .dataSourceTypes.set(4, 'bigquery');
+      mockAxiosInstance.get
+        .mockResolvedValueOnce({
+          data: { id: 4, type: 'bigquery', options: { location: 'us' } },
+        })
+        .mockResolvedValueOnce({ data: schemaStream() })
+        .mockResolvedValueOnce({ data: schemaStream() });
+      mockAxiosInstance.post.mockRejectedValue(new Error('warehouse unavailable'));
+
+      const first = await client.getSchemaPage(4, 1, 1, 'user');
+      const second = await client.getSchemaPage(4, 1, 1, 'order');
+      expectSchemaPage(first);
+      expectSchemaPage(second);
+
+      expect(first.schema).toEqual([mockSchema.schema[0]]);
+      expect(second.schema).toEqual([mockSchema.schema[1]]);
+      expect(mockAxiosInstance.post).toHaveBeenCalledTimes(1);
+      expect(logger.warning).toHaveBeenCalledWith(
+        'BigQuery schema pagination failed; falling back to the Redash schema endpoint',
+        expect.objectContaining({
+          'redash.data_source.id': 4,
+          'redash.schema.search_present': true,
+        }),
+        expect.any(Error),
       );
     });
 

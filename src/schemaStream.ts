@@ -1,9 +1,11 @@
 import type { Readable } from 'node:stream';
 import chain from 'stream-chain';
+import Assembler from 'stream-json/assembler.js';
 import { parser } from 'stream-json';
 import type { Token } from 'stream-json/parser.js';
 import { pick } from 'stream-json/filters/pick.js';
 import { streamArray } from 'stream-json/streamers/stream-array.js';
+import { schemaPageOffset } from './schemaPagination.js';
 import { destroyQuietly } from './utils.js';
 
 export interface SchemaTable {
@@ -24,6 +26,12 @@ export interface RedashSchemaPage {
   schema: SchemaTable[];
 }
 
+export interface RedashSchemaJobResponse {
+  job: Record<string, unknown>;
+}
+
+export type RedashSchemaResponse = RedashSchemaPage | RedashSchemaJobResponse;
+
 export interface ReadSchemaPageOptions {
   page: number;
   pageSize: number;
@@ -38,23 +46,96 @@ export interface ReadSchemaPageOptions {
 export async function readSchemaPage(
   source: Readable,
   options: ReadSchemaPageOptions,
-): Promise<RedashSchemaPage> {
+): Promise<RedashSchemaResponse> {
   const { page, pageSize, search, deadlineMs } = options;
   const searchLower = search?.toLowerCase();
-  const offset = (page - 1) * pageSize;
+  let offset: number;
+  try {
+    offset = schemaPageOffset(page, pageSize);
+  } catch (error) {
+    destroyQuietly(source);
+    throw error;
+  }
 
-  // Distinguishes {"schema": []} (valid, empty) from an error payload such as
-  // {"message": "..."} that lacks the schema key entirely.
-  let sawSchemaKey = false;
+  // A cache miss makes Redash return {"job": {...}} while it refreshes the
+  // schema asynchronously. Preserve that small response just as the previous
+  // unpaginated client did. If the job happened to finish before Redash
+  // serialized it, its result can contain the complete schema; select and page
+  // that array instead of assembling it into the job object.
+  let documentDepth = 0;
+  let awaitingJobValue = false;
+  let jobAssembler: Assembler<Record<string, unknown>> | undefined;
+  let skippedJobResultDepth = 0;
+  let jobResponse: RedashSchemaJobResponse | undefined;
+
+  function observeResponseToken(token: Token): Token {
+    if (jobAssembler !== undefined) {
+      if (skippedJobResultDepth > 0) {
+        if (token.name === 'startObject' || token.name === 'startArray') {
+          skippedJobResultDepth += 1;
+        } else if (token.name === 'endObject' || token.name === 'endArray') {
+          skippedJobResultDepth -= 1;
+        }
+      } else if (
+        token.name === 'startArray'
+        && jobAssembler.depth === 1
+        && (jobAssembler.key === 'result' || jobAssembler.key === 'query_result_id')
+      ) {
+        // Redash serializes the completed schema under both result and the
+        // legacy query_result_id field. Keep metadata assembly bounded and let
+        // the page selector below consume job.result.
+        jobAssembler.consume({ name: 'nullValue', value: null });
+        skippedJobResultDepth = 1;
+      } else {
+        jobAssembler.consume(token);
+        if (jobAssembler.done) {
+          const job = jobAssembler.current;
+          if (typeof job !== 'object' || job === null || Array.isArray(job)) {
+            throw new Error('Redash schema response contained an invalid "job" object');
+          }
+          jobResponse = { job };
+          jobAssembler = undefined;
+        }
+      }
+    } else if (awaitingJobValue) {
+      awaitingJobValue = false;
+      if (token.name !== 'startObject') {
+        throw new Error('Redash schema response contained an invalid "job" object');
+      }
+      jobAssembler = new Assembler<Record<string, unknown>>();
+      jobAssembler.consume(token);
+    } else if (documentDepth === 1 && token.name === 'keyValue' && token.value === 'job') {
+      awaitingJobValue = true;
+    }
+
+    if (token.name === 'startObject' || token.name === 'startArray') {
+      documentDepth += 1;
+    } else if (token.name === 'endObject' || token.name === 'endArray') {
+      documentDepth -= 1;
+    }
+
+    return token;
+  }
+
+  // Distinguishes a valid empty schema array from an unrelated error payload.
+  // job.result is selected too because a very fast refresh can finish before
+  // the initial schema response is serialized.
+  let sawSchemaArray = false;
 
   const pipeline = chain([
     source,
     // streamArray's assembler only reads packed values (keyValue/stringValue),
     // so the chunk-wise value tokens would be generated only to be discarded.
     parser({ streamValues: false }),
-    pick({ filter: 'schema' }),
+    observeResponseToken,
+    pick({
+      filter: (stack, token) => token.name === 'startArray' && (
+        (stack.length === 1 && stack[0] === 'schema')
+        || (stack.length === 2 && stack[0] === 'job' && stack[1] === 'result')
+      ),
+    }),
     (token: Token) => {
-      sawSchemaKey = true;
+      sawSchemaArray = true;
       return token;
     },
     streamArray(),
@@ -98,7 +179,10 @@ export async function readSchemaPage(
     destroyQuietly(source);
   }
 
-  if (!sawSchemaKey) {
+  if (!sawSchemaArray) {
+    if (jobResponse !== undefined) {
+      return jobResponse;
+    }
     throw new Error('Redash schema response did not contain a "schema" array');
   }
 

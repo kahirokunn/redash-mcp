@@ -1,5 +1,16 @@
 import { Readable } from 'node:stream';
-import { readSchemaPage, type SchemaTable } from '../schemaStream.js';
+import {
+  readSchemaPage,
+  type RedashSchemaPage,
+  type RedashSchemaResponse,
+  type SchemaTable,
+} from '../schemaStream.js';
+
+function expectSchemaPage(response: RedashSchemaResponse): asserts response is RedashSchemaPage {
+  if (!('schema' in response)) {
+    throw new Error('Expected a schema page, received a schema job');
+  }
+}
 
 function makeTables(count: number, namePrefix = 'table_'): SchemaTable[] {
   return Array.from({ length: count }, (_, i) => ({
@@ -48,6 +59,7 @@ describe('readSchemaPage', () => {
       { name: '売上データ.注文履歴', columns: [{ name: '注文番号', type: 'string' }] },
     ];
     const result = await readSchemaPage(sourceFrom(schemaJson(tables), 3), baseOptions);
+    expectSchemaPage(result);
 
     expect(result.schema).toEqual(tables);
   });
@@ -57,11 +69,13 @@ describe('readSchemaPage', () => {
     const json = schemaJson(tables);
 
     const page1 = await readSchemaPage(sourceFrom(json), baseOptions);
+    expectSchemaPage(page1);
     expect(page1.schema).toEqual(tables.slice(0, 25));
     expect(page1.hasMore).toBe(true);
     expect(page1.nextPage).toBe(2);
 
     const page2 = await readSchemaPage(sourceFrom(json), { ...baseOptions, page: 2 });
+    expectSchemaPage(page2);
     expect(page2.schema).toEqual(tables.slice(25));
     expect(page2.hasMore).toBe(false);
     expect(page2.nextPage).toBeNull();
@@ -70,6 +84,7 @@ describe('readSchemaPage', () => {
   it('does not report hasMore when the last page is exactly full', async () => {
     const tables = makeTables(50);
     const result = await readSchemaPage(sourceFrom(schemaJson(tables)), { ...baseOptions, page: 2 });
+    expectSchemaPage(result);
 
     expect(result.schema).toEqual(tables.slice(25));
     expect(result.hasMore).toBe(false);
@@ -78,6 +93,7 @@ describe('readSchemaPage', () => {
 
   it('returns an empty page beyond the end of the schema', async () => {
     const result = await readSchemaPage(sourceFrom(schemaJson(makeTables(10))), { ...baseOptions, page: 3 });
+    expectSchemaPage(result);
 
     expect(result.schema).toEqual([]);
     expect(result.hasMore).toBe(false);
@@ -89,11 +105,13 @@ describe('readSchemaPage', () => {
     const json = schemaJson(tables);
 
     const page1 = await readSchemaPage(sourceFrom(json, 64), { ...baseOptions, search: 'users' });
+    expectSchemaPage(page1);
     expect(page1.schema).toEqual(tables.slice(170, 195));
     expect(page1.hasMore).toBe(true);
     expect(page1.nextPage).toBe(2);
 
     const page2 = await readSchemaPage(sourceFrom(json, 64), { ...baseOptions, page: 2, search: 'users' });
+    expectSchemaPage(page2);
     expect(page2.schema).toEqual(tables.slice(195));
     expect(page2.hasMore).toBe(false);
   });
@@ -112,6 +130,7 @@ describe('readSchemaPage', () => {
     const source = Readable.from(countingChunks());
 
     const result = await readSchemaPage(source, baseOptions);
+    expectSchemaPage(result);
 
     expect(result.schema).toHaveLength(25);
     expect(result.hasMore).toBe(true);
@@ -141,10 +160,65 @@ describe('readSchemaPage', () => {
     });
   });
 
+  it('returns a pending Redash schema job without treating it as malformed', async () => {
+    const response = {
+      job: {
+        id: 'schema-job-123',
+        updated_at: 0,
+        status: 1,
+        error: '',
+        result: null,
+        query_result_id: null,
+      },
+    };
+
+    const result = await readSchemaPage(sourceFrom(JSON.stringify(response), 3), baseOptions);
+
+    expect(result).toEqual(response);
+  });
+
+  it('paginates a schema job that completed before its initial response was serialized', async () => {
+    const tables = makeTables(3);
+    const response = {
+      job: {
+        id: 'schema-job-123',
+        updated_at: 1,
+        status: 3,
+        error: '',
+        result: tables,
+        // Redash duplicates job.result into this legacy field.
+        query_result_id: tables,
+      },
+    };
+
+    const result = await readSchemaPage(sourceFrom(JSON.stringify(response), 5), {
+      ...baseOptions,
+      page: 2,
+      pageSize: 2,
+    });
+
+    expect(result).toEqual({
+      page: 2,
+      pageSize: 2,
+      hasMore: false,
+      nextPage: null,
+      schema: tables.slice(2),
+    });
+  });
+
   it('rejects when schema is not an array', async () => {
     await expect(
       readSchemaPage(sourceFrom('{"schema": {"not": "an array"}}'), baseOptions),
     ).rejects.toThrow();
+  });
+
+  it('rejects invalid pagination and destroys the source before parsing', async () => {
+    const source = sourceFrom('{"schema": []}');
+
+    await expect(
+      readSchemaPage(source, { ...baseOptions, pageSize: 101 }),
+    ).rejects.toThrow('pageSize must be an integer between 1 and 100');
+    expect(source.destroyed).toBe(true);
   });
 
   it('rejects when the source stalls past the deadline', async () => {

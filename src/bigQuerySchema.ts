@@ -1,4 +1,5 @@
 import type { RedashSchemaPage, SchemaTable } from './schemaStream.js';
+import { schemaPageOffset } from './schemaPagination.js';
 
 type QueryRows = Array<Record<string, unknown>>;
 
@@ -27,11 +28,19 @@ function queryRows(response: unknown): QueryRows {
   return rows as QueryRows;
 }
 
-export function readBigQueryLocation(response: unknown): string {
-  const [row] = queryRows(response);
-  const location = row?.location;
+export function readBigQueryDataSourceLocation(dataSource: unknown): string | null {
+  if (typeof dataSource !== 'object' || dataSource === null) {
+    return null;
+  }
+
+  const options = (dataSource as Record<string, unknown>).options;
+  if (typeof options !== 'object' || options === null) {
+    return null;
+  }
+
+  const location = (options as Record<string, unknown>).location;
   if (typeof location !== 'string' || !/^[a-z0-9-]+$/i.test(location)) {
-    throw new Error('BigQuery metadata query returned an invalid location');
+    return null;
   }
 
   return location.toLowerCase();
@@ -47,10 +56,7 @@ export function buildBigQuerySchemaPageQuery(
     throw new Error('BigQuery location contained unexpected characters');
   }
 
-  const offset = (page - 1) * pageSize;
-  if (!Number.isSafeInteger(offset)) {
-    throw new Error('page and pageSize produce an unsupported offset');
-  }
+  const offset = schemaPageOffset(page, pageSize);
 
   const region = `region-${location.toLowerCase()}`;
   const searchPredicate = search === undefined
@@ -78,13 +84,15 @@ page_tables AS (
 ),
 table_descriptions AS (
   SELECT
-    table_catalog,
-    table_schema,
-    table_name,
-    ANY_VALUE(JSON_VALUE(option_value)) AS table_description
-  FROM \`${region}\`.INFORMATION_SCHEMA.TABLE_OPTIONS
-  WHERE option_name = 'description'
-  GROUP BY table_catalog, table_schema, table_name
+    d.table_catalog,
+    d.table_schema,
+    d.table_name,
+    ANY_VALUE(JSON_VALUE(d.option_value)) AS table_description
+  FROM \`${region}\`.INFORMATION_SCHEMA.TABLE_OPTIONS AS d
+  JOIN page_tables AS t
+    USING (table_catalog, table_schema, table_name)
+  WHERE d.option_name = 'description'
+  GROUP BY d.table_catalog, d.table_schema, d.table_name
 )
 SELECT
   t.page_position,

@@ -338,23 +338,25 @@ Published images are signed with keyless cosign.
 Use `get_schema` when an MCP client needs table and column names for writing a
 query. A caller can request a small page, inspect `hasMore`, and follow `nextPage`
 without loading the entire warehouse schema into this MCP server. For BigQuery,
-the source-level query also prevents Redash from materializing the complete schema.
+a configured location also allows the server to fetch only the requested tables.
 
 | Data source | How one page is read | Why |
 | --- | --- | --- |
-| BigQuery (`bigquery` and `bigquery_gce`) | Detect the connection location with `SELECT @@location`, then query that region's `INFORMATION_SCHEMA` for only the requested tables. | Redash's `/api/data_sources/4/schema` response first materializes the complete cached schema in the Redash web process. Very large BigQuery projects can exhaust that process before HTTP streaming begins. |
-| Other data sources | Stream `/api/data_sources/{dataSourceId}/schema`, parse tables incrementally, and stop the HTTP transfer after the requested page plus one table. | The MCP server retains only the requested page instead of the complete Redash response. |
+| BigQuery (`bigquery` and `bigquery_gce`) | Read the connection's configured `location` from `/api/data_sources/{dataSourceId}`, then query that region's `INFORMATION_SCHEMA` for only the requested tables. If the API does not expose a valid location or the metadata query fails, stream the schema endpoint instead. | A configured location lets Redash avoid materializing its complete cached schema for very large BigQuery projects. The fallback keeps `get_schema` usable for API keys that cannot read connection options. |
+| Query Results (`results`) | Static schema discovery is unavailable. Use `execute_adhoc_query` with tables such as `query_123` or `cached_query_123`. | Query Results creates its SQLite tables dynamically from saved query results, so there is no fixed table or column list for `get_schema` to return. |
+| Other schema-capable data sources | Stream `/api/data_sources/{dataSourceId}/schema`, parse tables incrementally, and stop the HTTP transfer after the requested page plus one table. | The MCP server retains only the requested page instead of the complete Redash response. |
 
 Parameters: `dataSourceId` (required), `page` (default 1), `pageSize` (default 25,
 max 100), and `search` (optional case-insensitive substring match on table names;
 pagination applies to the filtered set). The response includes `hasMore` and
 `nextPage` for iterating through large schemas.
 
-For example, to inspect tables in the actual BigQuery dataset
-`customer_service_public` on data source `4`, call `get_schema` with
-`{"dataSourceId":4,"pageSize":10,"search":"customer_service_public."}`. Very wide
-tables such as GA4 event exports can contain hundreds of field paths, so use
-`pageSize: 1` when a client needs to keep each tool result small.
+For example, to inspect tables in a BigQuery dataset named `analytics_public`
+on data source `7`, call `get_schema` with
+`{"dataSourceId":7,"pageSize":10,"search":"analytics_public."}`. `pageSize`
+limits the number of tables in one response; it does not split the columns or
+nested field paths within a table. A wide table such as a GA4 event export is
+therefore returned with all of its field paths even when `pageSize` is `1`.
 
 ### Dashboard Management
 - `list_dashboards`: List all available dashboards

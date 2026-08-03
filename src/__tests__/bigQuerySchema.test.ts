@@ -1,6 +1,6 @@
 import {
   buildBigQuerySchemaPageQuery,
-  readBigQueryLocation,
+  readBigQueryDataSourceLocation,
   readBigQuerySchemaPage,
 } from '../bigQuerySchema.js';
 
@@ -16,6 +16,7 @@ describe('BigQuery schema pagination', () => {
     expect(query).toContain('`region-asia-northeast1`.INFORMATION_SCHEMA.COLUMN_FIELD_PATHS');
     expect(query).toContain('LIMIT 26 OFFSET 25');
     expect(query).toContain('WHERE page_position <= 25');
+    expect(query).toContain('JOIN page_tables AS t\n    USING (table_catalog, table_schema, table_name)');
     expect(query).toContain('(SELECT COUNT(*) > 25 FROM numbered_tables) AS has_more');
     expect(query).toContain('TO_JSON_STRING(ARRAY_AGG(');
   });
@@ -38,20 +39,27 @@ describe('BigQuery schema pagination', () => {
     );
   });
 
-  it('reads and normalizes the BigQuery execution location', () => {
-    expect(readBigQueryLocation(resultWithRows([{ location: 'ASIA-NORTHEAST1' }]))).toBe(
-      'asia-northeast1',
-    );
-    expect(readBigQueryLocation({ data: { rows: [{ location: 'us' }] } })).toBe('us');
+  it.each([
+    [0, 25, 'page must be a positive integer'],
+    [1, 0, 'pageSize must be an integer between 1 and 100'],
+    [1, 1.5, 'pageSize must be an integer between 1 and 100'],
+    [1, 101, 'pageSize must be an integer between 1 and 100'],
+  ])('rejects invalid query pagination page=%p pageSize=%p', (page, pageSize, message) => {
+    expect(() => buildBigQuerySchemaPageQuery('us', page, pageSize)).toThrow(message);
   });
 
-  it('rejects a missing or unsafe BigQuery execution location', () => {
-    expect(() => readBigQueryLocation(resultWithRows([]))).toThrow(
-      'BigQuery metadata query returned an invalid location',
-    );
-    expect(() => readBigQueryLocation(resultWithRows([{ location: 'us`' }]))).toThrow(
-      'BigQuery metadata query returned an invalid location',
-    );
+  it('reads and normalizes the configured BigQuery location', () => {
+    expect(readBigQueryDataSourceLocation({
+      id: 7,
+      options: { location: 'ASIA-NORTHEAST1' },
+    })).toBe('asia-northeast1');
+    expect(readBigQueryDataSourceLocation({ options: { location: 'us' } })).toBe('us');
+  });
+
+  it('returns null for a missing or unsafe configured location', () => {
+    expect(readBigQueryDataSourceLocation({ options: {} })).toBeNull();
+    expect(readBigQueryDataSourceLocation({ options: { location: 'us`' } })).toBeNull();
+    expect(readBigQueryDataSourceLocation(null)).toBeNull();
   });
 
   it('groups metadata rows into Redash schema tables', () => {
