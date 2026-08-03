@@ -865,18 +865,23 @@ async function deleteVisualization(params: z.infer<typeof deleteVisualizationSch
 // Tool: get_schema
 const getSchemaSchema = z.object({
   dataSourceId: z.coerce.number().describe("ID of the data source to get schema"),
+  page: z.coerce.number().int().min(1).optional().default(1).describe("Page number (starts at 1)"),
+  pageSize: z.coerce.number().int().min(1).max(100).optional().default(25)
+    .describe("Number of tables per page (max 100)"),
+  search: z.string().optional()
+    .describe("Case-insensitive substring filter on table names; pagination applies to the filtered set"),
 });
 
 async function getSchema(params: z.infer<typeof getSchemaSchema>) {
   try {
-    const { dataSourceId } = params;
-    const query = await getRedashClient().getSchema(dataSourceId);
+    const { dataSourceId, page, pageSize, search } = params;
+    const schemaPage = await getRedashClient().getSchemaPage(dataSourceId, page, pageSize, search);
 
     return {
       content: [
         {
           type: "text",
-          text: JSON.stringify(query, null, 2),
+          text: JSON.stringify(schemaPage, null, 2),
         },
       ],
     };
@@ -2190,7 +2195,7 @@ export const toolDefinitions = [
     chartVisualizationUpdateSchema,
   ),
   defineTool("delete_visualization", "Delete a visualization", deleteVisualization, deleteVisualizationSchema),
-  defineTool("get_schema", "Get schema of a specific data source", getSchema, getSchemaSchema),
+  defineTool("get_schema", "Get a schema page without buffering the complete schema in MCP (BigQuery is paged at the source); returns hasMore/nextPage and supports table-name search", getSchema, getSchemaSchema),
   defineTool("create_dashboard", "Create a new dashboard in Redash", createDashboard, createDashboardSchema),
   defineTool("update_dashboard", "Update an existing dashboard in Redash", updateDashboard, updateDashboardSchema),
   defineTool("get_dashboard_parameters", "Get the current dashboard parameter values and widget mappings", getDashboardParameters, getDashboardParametersSchema),

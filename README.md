@@ -332,6 +332,30 @@ Published images are signed with keyless cosign.
 - `execute_adhoc_query`: Execute an ad-hoc query without saving it to Redash
 - `get_query_results_csv`: Get query results in CSV format (supports optional refresh for latest data)
 
+### Schema Discovery
+- `get_schema`: Get the schema of a data source, paginated by table
+
+Use `get_schema` when an MCP client needs table and column names for writing a
+query. A caller can request a small page, inspect `hasMore`, and follow `nextPage`
+without loading the entire warehouse schema into this MCP server. For BigQuery,
+the source-level query also prevents Redash from materializing the complete schema.
+
+| Data source | How one page is read | Why |
+| --- | --- | --- |
+| BigQuery (`bigquery` and `bigquery_gce`) | Detect the connection location with `SELECT @@location`, then query that region's `INFORMATION_SCHEMA` for only the requested tables. | Redash's `/api/data_sources/4/schema` response first materializes the complete cached schema in the Redash web process. Very large BigQuery projects can exhaust that process before HTTP streaming begins. |
+| Other data sources | Stream `/api/data_sources/{dataSourceId}/schema`, parse tables incrementally, and stop the HTTP transfer after the requested page plus one table. | The MCP server retains only the requested page instead of the complete Redash response. |
+
+Parameters: `dataSourceId` (required), `page` (default 1), `pageSize` (default 25,
+max 100), and `search` (optional case-insensitive substring match on table names;
+pagination applies to the filtered set). The response includes `hasMore` and
+`nextPage` for iterating through large schemas.
+
+For example, to inspect tables in the actual BigQuery dataset
+`customer_service_public` on data source `4`, call `get_schema` with
+`{"dataSourceId":4,"pageSize":10,"search":"customer_service_public."}`. Very wide
+tables such as GA4 event exports can contain hundreds of field paths, so use
+`pageSize: 1` when a client needs to keep each tool result small.
+
 ### Dashboard Management
 - `list_dashboards`: List all available dashboards
 - `get_dashboard`: Get dashboard details and visualizations

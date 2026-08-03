@@ -94,6 +94,34 @@ describe("Redash MCP server", () => {
     }
   });
 
+  it("passes pagination and search arguments through get_schema", async () => {
+    const schemaPage = {
+      page: 2,
+      pageSize: 10,
+      hasMore: false,
+      nextPage: null,
+      schema: [{ name: "users", columns: [{ name: "id", type: "integer" }] }],
+    };
+    const getSchemaPageSpy = jest
+      .spyOn(redashClient, "getSchemaPage")
+      .mockResolvedValue(schemaPage as never);
+    const connection = await connectDirectClient();
+
+    try {
+      const result = await connection.client.callTool({
+        name: "get_schema",
+        arguments: { dataSourceId: "3", page: "2", pageSize: "10", search: "user" },
+      });
+
+      expect(result.isError).not.toBe(true);
+      expect(getSchemaPageSpy).toHaveBeenCalledWith(3, 2, 10, "user");
+      const [content] = result.content as Array<{ type: string; text: string }>;
+      expect(JSON.parse(content.text)).toEqual(schemaPage);
+    } finally {
+      await connection.close();
+    }
+  });
+
   it("lists query and dashboard resources and reads both URI types", async () => {
     jest.spyOn(redashClient, "getQueries").mockResolvedValue({
       results: [{ id: 11, name: "Revenue", description: "Monthly revenue" }],

@@ -1,8 +1,16 @@
 import axios, { AxiosInstance, AxiosError } from 'axios';
 import * as dotenv from 'dotenv';
+import { Readable } from 'node:stream';
 import { SocksProxyAgent } from 'socks-proxy-agent';
 import { logger, type LogFields } from './logger.js';
+import {
+  buildBigQuerySchemaPageQuery,
+  readBigQueryLocation,
+  readBigQuerySchemaPage,
+} from './bigQuerySchema.js';
+import { readSchemaPage, type RedashSchemaPage } from './schemaStream.js';
 import { isToolContentCaptureEnabled } from './telemetry.js';
+import { destroyQuietly, formatError } from './utils.js';
 
 dotenv.config({ quiet: true });
 
@@ -149,9 +157,21 @@ function redashRequestErrorFields(
     },
     {
       "redash.request.body": requestBody,
-      "redash.response.body": response?.data,
+      // Streamed error bodies (responseType: 'stream') carry sockets and
+      // buffered response fragments; they must never land in log attributes.
+      "redash.response.body": response?.data instanceof Readable ? undefined : response?.data,
     },
   );
+}
+
+function redashRequestError(prefix: string, error: AxiosError): Error {
+  if (error.response) {
+    return new Error(`${prefix}: Redash API error (${error.response.status})`);
+  }
+  if (error.request) {
+    return new Error(`${prefix}: No response received from Redash API: ${error.message}`);
+  }
+  return new Error(`${prefix}: ${error.message}`);
 }
 
 export interface RedashSchema {
@@ -305,10 +325,20 @@ export class RedashClient {
   private client: AxiosInstance;
   private baseUrl: string;
   private apiKey: string;
+  private timeoutMs: number;
+  private dataSourceTypes = new Map<number, string>();
+  private bigQueryLocations = new Map<number, string>();
 
   constructor() {
     this.baseUrl = process.env.REDASH_URL || '';
     this.apiKey = process.env.REDASH_API_KEY || '';
+    // Strict digit check: parseInt would misread "30s" as 30 (a 30ms budget),
+    // and a NaN here would turn the schema-read deadline into ~1ms. The cap is
+    // the largest delay setTimeout supports.
+    const rawTimeout = (process.env.REDASH_TIMEOUT ?? '').trim();
+    this.timeoutMs = /^\d+$/.test(rawTimeout) && Number(rawTimeout) > 0
+      ? Math.min(Number(rawTimeout), 2147483647)
+      : 30000;
 
     if (!this.baseUrl || !this.apiKey) {
       throw new Error('REDASH_URL and REDASH_API_KEY must be provided in .env file');
@@ -333,7 +363,7 @@ export class RedashClient {
         ...defaultHeaders,
         ...extraHeaders,
       },
-      timeout: parseInt(process.env.REDASH_TIMEOUT || '30000')
+      timeout: this.timeoutMs
     };
 
     const socksProxy = process.env.REDASH_SOCKS_PROXY;
@@ -840,6 +870,119 @@ export class RedashClient {
         `Failed to fetch data source ${dataSourceId} schema from Redash`
       );
     }
+  }
+
+  // Get one page without materializing an entire warehouse schema. BigQuery is
+  // paged at the source through INFORMATION_SCHEMA; other data sources use the
+  // Redash cached-schema endpoint and parse its response incrementally.
+  async getSchemaPage(
+    dataSourceId: number,
+    page = 1,
+    pageSize = 25,
+    search?: string,
+  ): Promise<RedashSchemaPage> {
+    if (!Number.isSafeInteger(page) || page < 1) {
+      throw new Error('page must be a positive integer');
+    }
+    if (!Number.isInteger(pageSize) || pageSize < 1 || pageSize > 100) {
+      throw new Error('pageSize must be an integer between 1 and 100');
+    }
+    if (!Number.isSafeInteger((page - 1) * pageSize)) {
+      throw new Error('page and pageSize produce an unsupported offset');
+    }
+
+    const dataSourceType = await this.getDataSourceType(dataSourceId);
+    if (dataSourceType === 'bigquery' || dataSourceType === 'bigquery_gce') {
+      return await this.getBigQuerySchemaPage(dataSourceId, page, pageSize, search);
+    }
+
+    const path = `/api/data_sources/${dataSourceId}/schema`;
+    const requestFields: LogFields = {
+      "http.request.method": "GET",
+      "url.path": path,
+      "redash.data_source.id": dataSourceId,
+      "redash.schema.page": page,
+      "redash.schema.page_size": pageSize,
+      ...(search !== undefined ? { "redash.schema.search_present": true } : {}),
+    };
+    // The search term is user-supplied tool input; like query text elsewhere in
+    // this file, it only reaches log attributes when content capture is on.
+    const loggedFields = withCapturedRedashContent(requestFields, {
+      "redash.schema.search": search,
+    });
+
+    try {
+      logger.debug(`Fetching schema page ${page} for data source ${dataSourceId}`, loggedFields);
+      const response = await this.client.get(path, {
+        responseType: 'stream'
+      });
+
+      return await readSchemaPage(response.data, {
+        page,
+        pageSize,
+        search,
+        deadlineMs: this.timeoutMs,
+      });
+    } catch (error) {
+      const prefix = `Failed to fetch schema page for data source ${dataSourceId}`;
+      if (axios.isAxiosError(error)) {
+        const axiosError = error as AxiosError;
+        const body: unknown = axiosError.response?.data;
+        if (body instanceof Readable) {
+          // Error bodies arrive as streams under responseType: 'stream';
+          // destroy them so the socket is released, and drop them so a
+          // Readable never rides along on the logged exception object.
+          destroyQuietly(body);
+          axiosError.response!.data = undefined;
+        }
+        logger.error(
+          "Redash schema request failed",
+          redashRequestErrorFields(loggedFields, axiosError),
+          axiosError,
+        );
+        throw redashRequestError(prefix, axiosError);
+      }
+      logger.error("Error fetching Redash schema page", loggedFields, error);
+      throw new Error(`${prefix}: ${formatError(error)}`);
+    }
+  }
+
+  private async getDataSourceType(dataSourceId: number): Promise<string> {
+    const cached = this.dataSourceTypes.get(dataSourceId);
+    if (cached !== undefined) {
+      return cached;
+    }
+
+    const dataSources = await this.getDataSources();
+    const dataSource = dataSources.find(candidate => candidate?.id === dataSourceId);
+    if (typeof dataSource?.type !== 'string') {
+      throw new Error(`Data source ${dataSourceId} was not found or did not report its type`);
+    }
+
+    this.dataSourceTypes.set(dataSourceId, dataSource.type);
+    return dataSource.type;
+  }
+
+  private async getBigQuerySchemaPage(
+    dataSourceId: number,
+    page: number,
+    pageSize: number,
+    search?: string,
+  ): Promise<RedashSchemaPage> {
+    let location = this.bigQueryLocations.get(dataSourceId);
+    if (location === undefined) {
+      const locationResult = await this.executeAdhocQuery(
+        'SELECT @@location AS location',
+        dataSourceId,
+        false,
+      );
+      location = readBigQueryLocation(locationResult);
+      this.bigQueryLocations.set(dataSourceId, location);
+    }
+
+    const query = buildBigQuerySchemaPageQuery(location, page, pageSize, search);
+    const result = await this.executeAdhocQuery(query, dataSourceId, false);
+    return readBigQuerySchemaPage(result, page, pageSize);
   }
 
   // ----- Dashboard API Methods -----
