@@ -1,5 +1,10 @@
 # Changelog
 
+## [v0.0.16](https://github.com/kahirokunn/redash-mcp/compare/v0.0.15...v0.0.16) - 2026-08-07
+
+- Reuse Redash request error formatting by @kahirokunn in https://github.com/kahirokunn/redash-mcp/pull/5
+- Correct the ad hoc query tool description by @kahirokunn in https://github.com/kahirokunn/redash-mcp/pull/9
+
 ## [v0.0.15](https://github.com/suthio/redash-mcp/compare/v0.0.14...v0.0.15) - 2026-08-03
 
 - Add npm metadata for source and issues by @wowsofine in https://github.com/suthio/redash-mcp/pull/61
