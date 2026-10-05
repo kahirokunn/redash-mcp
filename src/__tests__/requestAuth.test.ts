@@ -50,12 +50,8 @@ describe('extractApiKeyFromAuthorizationHeader', () => {
     expect(extractApiKeyFromAuthorizationHeader(undefined)).toEqual({ status: 'absent' });
   });
 
-  it('returns "absent" for an empty header', () => {
-    expect(extractApiKeyFromAuthorizationHeader('')).toEqual({ status: 'absent' });
-  });
-
-  it('returns "absent" for a whitespace-only header', () => {
-    expect(extractApiKeyFromAuthorizationHeader('   ')).toEqual({ status: 'absent' });
+  it.each<[string | string[]]>([[''], ['   '], ['\t'], [[]]])('rejects a supplied blank header: %j', (headerValue) => {
+    expect(extractApiKeyFromAuthorizationHeader(headerValue).status).toBe('invalid');
   });
 
   it('rejects a header with only the Bearer keyword and no token', () => {

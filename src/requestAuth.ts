@@ -85,14 +85,14 @@ export type AuthorizationHeaderResult =
 export function extractApiKeyFromAuthorizationHeader(
   headerValue: string | string[] | undefined
 ): AuthorizationHeaderResult {
-  if (!headerValue) {
+  if (headerValue === undefined) {
     return { status: "absent" };
   }
 
   const raw = Array.isArray(headerValue) ? headerValue[0] : headerValue;
   const trimmed = raw?.trim();
   if (!trimmed) {
-    return { status: "absent" };
+    return { status: "invalid", reason: "Authorization header is blank" };
   }
 
   const schemeMatch = trimmed.match(/^(Bearer|Key)\s+(.+)$/i);

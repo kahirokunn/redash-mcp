@@ -483,6 +483,8 @@ describe("HTTP MCP server", () => {
 
   describe("rejects a supplied-but-unsupported Authorization header without falling back to REDASH_API_KEY", () => {
     it.each([
+      ["an empty header", ""],
+      ["a whitespace-only header", "   "],
       ["Basic", "Basic dXNlcjpwYXNz"],
       ["an empty Bearer", "Bearer"],
       ["Digest", 'Digest username="foo"'],
