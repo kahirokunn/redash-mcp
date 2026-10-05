@@ -56,6 +56,34 @@ jobs:
           build-mode: none
 
       - name: Analyze with CodeQL
+        id: codeql
         uses: github/codeql-action/analyze@v4
         with:
           category: /language:javascript-typescript
+          output: ${{ runner.temp }}/codeql-results
+
+      - name: Reject high-severity source vulnerabilities
+        shell: bash
+        env:
+          SARIF_DIRECTORY: ${{ steps.codeql.outputs.sarif-output }}
+        run: |
+          shopt -s failglob
+          jq --exit-status --slurp '
+            if length == 0 then error("Empty CodeQL SARIF") else .[] end
+            | if .version != "2.1.0" or (.runs | type) != "array" or (.runs | length) == 0
+              then error("Invalid CodeQL SARIF") else .runs[] end
+            | ([.tool.driver.rules[]?, .tool.extensions[]?.rules[]?] | INDEX(.id)) as $rules
+            | if ($rules | length) == 0 or (.results | type) != "array"
+              then error("Missing CodeQL rules or results") else . end
+            | [
+                .results[] | (.rule.id // .ruleId) as $id
+                | $rules[$id] // error("Unknown CodeQL rule: \($id)")
+                | (.properties["security-severity"] //
+                    if (.properties.tags // [] | index("security")) != null
+                    then error("Missing security severity: \(.id)") else "0" end | tonumber) as $severity
+                | if $severity < 0 or $severity > 10
+                  then error("Invalid security severity: \(.id)") else . end
+                | select($severity >= 7) | "\(.id) (\($severity))"
+              ]
+            | if length > 0 then error("High/Critical CodeQL findings: \(join(", "))") else true end
+          ' "${SARIF_DIRECTORY}"/*.sarif
