@@ -12,7 +12,11 @@
 // it) without threading it through every function signature in index.ts.
 import { AsyncLocalStorage } from "node:async_hooks";
 
-const redashApiKeyStorage = new AsyncLocalStorage<string | undefined>();
+export interface RedashRequestAuthContext {
+  readonly apiKey: string | undefined;
+}
+
+const redashApiKeyStorage = new AsyncLocalStorage<RedashRequestAuthContext>();
 
 /**
  * Runs `fn` with `apiKey` bound as the "current request's" Redash API key.
@@ -21,7 +25,7 @@ const redashApiKeyStorage = new AsyncLocalStorage<string | undefined>();
  * REDASH_API_KEY env var, unless `apiKey` is undefined.
  */
 export function runWithRedashApiKey<T>(apiKey: string | undefined, fn: () => T): T {
-  return redashApiKeyStorage.run(apiKey, fn);
+  return redashApiKeyStorage.run({ apiKey }, fn);
 }
 
 /**
@@ -30,6 +34,11 @@ export function runWithRedashApiKey<T>(apiKey: string | undefined, fn: () => T):
  * stdio mode, or an HTTP request that didn't send an Authorization header).
  */
 export function getRequestRedashApiKey(): string | undefined {
+  return redashApiKeyStorage.getStore()?.apiKey;
+}
+
+/** Request identity remains available even when authentication uses the static fallback key. */
+export function getRequestRedashAuthContext(): RedashRequestAuthContext | undefined {
   return redashApiKeyStorage.getStore();
 }
 

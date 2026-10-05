@@ -16,7 +16,11 @@ import {
 } from './schemaStream.js';
 import { isToolContentCaptureEnabled } from './telemetry.js';
 import { destroyQuietly, formatError } from './utils.js';
-import { getRequestRedashApiKey } from './requestAuth.js';
+import {
+  getRequestRedashApiKey,
+  getRequestRedashAuthContext,
+  type RedashRequestAuthContext,
+} from './requestAuth.js';
 
 dotenv.config({ quiet: true });
 
@@ -316,6 +320,11 @@ export interface RedashDestination {
   options: any;
 }
 
+interface SchemaCaches {
+  dataSourceTypes: Map<number, string>;
+  bigQueryLocations: Map<number, string | null>;
+}
+
 // RedashClient class for API communication
 export class RedashClient {
   private client: AxiosInstance;
@@ -324,6 +333,7 @@ export class RedashClient {
   private timeoutMs: number;
   private dataSourceTypes = new Map<number, string>();
   private bigQueryLocations = new Map<number, string | null>();
+  private requestSchemaCaches = new WeakMap<RedashRequestAuthContext, SchemaCaches>();
 
   constructor() {
     this.baseUrl = process.env.REDASH_URL || '';
@@ -872,6 +882,7 @@ export class RedashClient {
     search?: string,
   ): Promise<RedashSchemaResponse> {
     schemaPageOffset(page, pageSize);
+    const caches = this.getSchemaCaches();
 
     const prefix = `Failed to fetch schema page for data source ${dataSourceId}`;
     const schemaFields: LogFields = {
@@ -886,7 +897,7 @@ export class RedashClient {
 
     let dataSourceType: string | undefined;
     try {
-      dataSourceType = await this.getDataSourceType(dataSourceId);
+      dataSourceType = await this.getDataSourceType(dataSourceId, caches.dataSourceTypes);
     } catch (error) {
       // Listing data sources requires the global list_data_sources permission,
       // while the schema endpoint only requires access to this data source.
@@ -909,7 +920,7 @@ export class RedashClient {
     if (dataSourceType === 'bigquery' || dataSourceType === 'bigquery_gce') {
       let location: string | null = null;
       try {
-        location = await this.getBigQueryLocation(dataSourceId);
+        location = await this.getBigQueryLocation(dataSourceId, caches.bigQueryLocations);
       } catch (error) {
         logger.warning(
           "Could not read the configured BigQuery location; falling back to the Redash schema endpoint",
@@ -922,7 +933,7 @@ export class RedashClient {
         try {
           return await this.getBigQuerySchemaPage(dataSourceId, location, page, pageSize, search);
         } catch (error) {
-          this.bigQueryLocations.set(dataSourceId, null);
+          caches.bigQueryLocations.set(dataSourceId, null);
           logger.warning(
             "BigQuery schema pagination failed; falling back to the Redash schema endpoint",
             loggedSchemaFields,
@@ -979,8 +990,25 @@ export class RedashClient {
     }
   }
 
-  private async getDataSourceType(dataSourceId: number): Promise<string> {
-    const cached = this.dataSourceTypes.get(dataSourceId);
+  private getSchemaCaches(): SchemaCaches {
+    const requestContext = getRequestRedashAuthContext();
+    if (!requestContext) {
+      return { dataSourceTypes: this.dataSourceTypes, bigQueryLocations: this.bigQueryLocations };
+    }
+
+    // Discovery results depend on the caller's permissions. HTTP requests
+    // reuse them only within their own context, including negative results.
+    // Weak keys allow the cache to be collected when that context is released.
+    let caches = this.requestSchemaCaches.get(requestContext);
+    if (!caches) {
+      caches = { dataSourceTypes: new Map(), bigQueryLocations: new Map() };
+      this.requestSchemaCaches.set(requestContext, caches);
+    }
+    return caches;
+  }
+
+  private async getDataSourceType(dataSourceId: number, cache: Map<number, string>): Promise<string> {
+    const cached = cache.get(dataSourceId);
     if (cached !== undefined) {
       return cached;
     }
@@ -988,7 +1016,7 @@ export class RedashClient {
     const dataSources = await this.getDataSources();
     for (const candidate of dataSources) {
       if (typeof candidate?.id === 'number' && typeof candidate?.type === 'string') {
-        this.dataSourceTypes.set(candidate.id, candidate.type);
+        cache.set(candidate.id, candidate.type);
       }
     }
     const dataSource = dataSources.find(candidate => candidate?.id === dataSourceId);
@@ -999,18 +1027,18 @@ export class RedashClient {
     return dataSource.type;
   }
 
-  private async getBigQueryLocation(dataSourceId: number): Promise<string | null> {
-    if (this.bigQueryLocations.has(dataSourceId)) {
-      return this.bigQueryLocations.get(dataSourceId) ?? null;
+  private async getBigQueryLocation(dataSourceId: number, cache: Map<number, string | null>): Promise<string | null> {
+    if (cache.has(dataSourceId)) {
+      return cache.get(dataSourceId) ?? null;
     }
 
     try {
       const response = await this.client.get(`/api/data_sources/${dataSourceId}`);
       const location = readBigQueryDataSourceLocation(response.data);
-      this.bigQueryLocations.set(dataSourceId, location);
+      cache.set(dataSourceId, location);
       return location;
     } catch (error) {
-      this.bigQueryLocations.set(dataSourceId, null);
+      cache.set(dataSourceId, null);
       throw error;
     }
   }
